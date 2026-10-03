@@ -20,6 +20,7 @@ from app.tools.customer_tools import (
     get_customer_context,
     get_customer_loans,
     get_customer_profile,
+    get_full_customer_context,
     get_loan_details,
     get_payment_history,
 )
@@ -30,6 +31,7 @@ CUSTOMER_SCOPED_TOOL_NAMES: set[str] = {
     "get_customer_loans",
     "get_customer_call_history",
     "get_customer_context",
+    "get_full_customer_context",
 }
 
 LOAN_SCOPED_TOOL_NAMES: set[str] = {
@@ -52,6 +54,7 @@ ALLOWED_TOOL_NAMES: set[str] = (
 TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_customer_profile": "Return the profile of the active customer in the current conversation. This tool uses the trusted request/customer context automatically; do not ask Gemini to provide customer_id.",
     "get_customer_loans": "Return all loans for the active customer in the current conversation. Use this only when the user asks about their loans. The backend injects the trusted current customer automatically; do not pass customer_id.",
+    "get_full_customer_context": "Return the complete customer context in one backend query: profile, active loans, payment history, and previous calls. Use this instead of separate customer and loan read tools whenever the full context is needed.",
     "get_loan_details": "Return details for a single loan using loan_id. Only call this when the user asks about one specific loan. The loan_id must belong to the current trusted customer; never query another customer's loan.",
     "get_payment_history": "Return payment history for a specific loan using loan_id. Only use this when the user asks about payments. The loan_id must belong to the current trusted customer; do not access another customer's loan.",
     "get_customer_call_history": "Return recent call history for the active customer in the current conversation. The backend injects the trusted current customer automatically; do not pass customer_id.",
@@ -150,6 +153,7 @@ def get_tool_registry() -> list[types.FunctionDeclaration]:
     functions: dict[str, Callable[..., Any]] = {
         "get_customer_profile": get_customer_profile,
         "get_customer_loans": get_customer_loans,
+        "get_full_customer_context": get_full_customer_context,
         "get_loan_details": get_loan_details,
         "get_payment_history": get_payment_history,
         "get_customer_call_history": get_customer_call_history,
@@ -180,6 +184,7 @@ def get_tool_function(name: str) -> Callable[..., Any]:
     registry = {
         "get_customer_profile": get_customer_profile,
         "get_customer_loans": get_customer_loans,
+        "get_full_customer_context": get_full_customer_context,
         "get_loan_details": get_loan_details,
         "get_payment_history": get_payment_history,
         "get_customer_call_history": get_customer_call_history,

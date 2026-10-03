@@ -9,6 +9,15 @@ from app.schemas.agent import (
     AgentTestResponse,
     GeminiHealthResponse,
 )
+from app.schemas.call_lifecycle import (
+    CallMessageRequest,
+    CallMessageResponse,
+    EndCallRequest,
+    EndCallResponse,
+    StartCallRequest,
+    StartCallResponse,
+)
+from app.services.call_lifecycle_service import CallLifecycleService
 from app.services.gemini_service import GeminiConfigError, GeminiService
 
 router = APIRouter(prefix="/api/v1", tags=["agent"])
@@ -21,6 +30,57 @@ BANKING_SYSTEM_INSTRUCTIONS = (
     "When a customer says they cannot pay, acknowledge it, resolve with empathy, and suggest a next step such as a callback, repayment plan, or verification of payment timing. "
     "Use tools when the conversation needs customer, loan, payment, or call details before answering."
 )
+
+
+@router.post("/agent/calls/start", response_model=StartCallResponse)
+def start_call(payload: StartCallRequest, db: Session = Depends(get_db)):
+    try:
+        service = CallLifecycleService(db)
+        result = service.start_call(payload.customer_id)
+        return {
+            "call_id": result["call_id"],
+            "customer": result["customer"],
+            "strategy": result["strategy"],
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start call: {str(exc)}") from exc
+
+
+@router.post("/agent/calls/{call_id}/message", response_model=CallMessageResponse)
+def send_message_to_call(call_id: int, payload: CallMessageRequest, db: Session = Depends(get_db)):
+    try:
+        service = CallLifecycleService(db)
+        result = service.handle_message(call_id, payload.message)
+        return {
+            "call_id": result["call_id"],
+            "response": result["response"],
+            "turn_number": result["turn_number"],
+            "tool_calls": result.get("tool_calls", []),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to process message: {str(exc)}") from exc
+
+
+@router.post("/agent/calls/{call_id}/end", response_model=EndCallResponse)
+def end_call(call_id: int, payload: EndCallRequest | None = None, db: Session = Depends(get_db)):
+    try:
+        service = CallLifecycleService(db)
+        summary = payload.summary if payload else None
+        result = service.end_call(call_id, summary=summary)
+        return {
+            "call_id": result["call_id"],
+            "status": result["status"],
+            "outcome": result["outcome"],
+            "metrics": result["metrics"],
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to end call: {str(exc)}") from exc
 
 
 @router.post("/agent/test", response_model=AgentTestResponse)
@@ -52,22 +112,29 @@ def test_agent_generation(payload: AgentTestRequest):
 def process_agent_conversation(payload: AgentConversationRequest, db: Session = Depends(get_db)):
     try:
         service = GeminiService()
-        trusted_customer_id = payload.customer_id
-        result = service.process_with_tools(
-            system_instructions=BANKING_SYSTEM_INSTRUCTIONS,
-            conversation_history=payload.conversation_history,
-            current_message=payload.message,
-            customer_context=payload.customer_context,
-            max_tool_rounds=3,
-            db=db,
-            trusted_customer_id=trusted_customer_id,
-        )
+        if payload.call_id is not None:
+            call_service = CallLifecycleService(db)
+            result = call_service.handle_message(payload.call_id, payload.message, conversation_history=payload.conversation_history)
+            return {
+                "response": result["response"],
+                "model": service.model_name,
+                "status": "ok",
+                "tool_calls": result.get("tool_calls", []),
+                "tool_rounds": 1,
+            }
+
+        if payload.customer_id is None:
+            raise ValueError("customer_id is required for a new conversation")
+
+        call_service = CallLifecycleService(db)
+        start_result = call_service.start_call(payload.customer_id)
+        result = call_service.handle_message(start_result["call_id"], payload.message, conversation_history=payload.conversation_history)
         return {
             "response": result["response"],
             "model": service.model_name,
-            "status": result.get("status", "ok"),
+            "status": "ok",
             "tool_calls": result.get("tool_calls", []),
-            "tool_rounds": result.get("tool_rounds", 0),
+            "tool_rounds": 1,
         }
     except GeminiConfigError as exc:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured") from exc
