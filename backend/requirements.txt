@@ -4,3 +4,6 @@ sqlalchemy
 psycopg[binary]
 python-dotenv
 google-genai
+livekit-agents
+livekit-plugins-deepgram
+livekit-plugins-cartesia

@@ -46,6 +46,16 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Set the frontend environment variable `VITE_API_BASE_URL` to point to the backend, e.g. `http://localhost:8000`.
+
 ## Environment variables
 
 The backend expects these variables in `backend/.env`:
@@ -119,3 +129,54 @@ Example response:
 - The database schema and seeds are intentionally not modified in this phase.
 - The Gemini integration is intentionally minimal and modular for future tool/function-calling work.
 - This phase does not include STT, TTS, LiveKit, or voice infrastructure.
+
+## Phase 7 — LiveKit + Deepgram + Cartesia (Voice agent)
+
+This repository now contains a minimal LiveKit agent package (Phase 7) that
+connects real-time LiveKit sessions with Deepgram for streaming STT and
+Cartesia Sonic 3 for streaming TTS. The implementation intentionally keeps
+the existing Phase 5/6 backend architecture unchanged and reuses the
+GeminiService, tool registry, and call lifecycle services.
+
+Required environment variables (add to `backend/.env`):
+
+```
+LIVEKIT_URL=
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+DEEPGRAM_API_KEY=
+DEEPGRAM_MODEL=flux-general-multi
+CARTESIA_API_KEY=
+CARTESIA_MODEL=sonic-3
+CARTESIA_LANGUAGE=en
+CARTESIA_VOICE_ID=<voice-id>
+```
+
+Install additional dependencies in the backend virtualenv:
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Running the LiveKit agent (example smoke test):
+
+```bash
+# from the backend directory
+python -c "from app.livekit_agent.agent import LiveKitAgent; print(LiveKitAgent().smoke_test())"
+```
+
+The LiveKit agent package lives at `backend/app/livekit_agent` and provides:
+- `LiveKitAgent`: initialization and provider bindings (no network I/O on import)
+- `LiveSession`: in-memory session state for an active room/call
+- lightweight wrappers in `tools.py` that call existing Phase 6 lifecycle services
+
+Notes:
+- The LiveKit agent does not start or join rooms automatically — it exposes
+  the hooks and initialization needed to attach Deepgram and Cartesia plugins
+  to a LiveKit Agents runtime. Implement joining/room event wiring in a
+  deployment-specific runner.
+- The design minimizes Gemini calls: one Gemini generation per user turn, and
+  calls to Phase 5 tools only when explicitly required by Gemini.
+
