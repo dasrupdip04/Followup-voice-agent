@@ -1,6 +1,8 @@
+from typing import Any
+
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, relationship
 
 from app.db import Base
@@ -73,6 +75,35 @@ class Call(Base):
     customer: Mapped[Customer] = relationship(back_populates="calls")
     outcome: Mapped["CallOutcome"] = relationship(back_populates="call", uselist=False)
     metric: Mapped["CallMetric"] = relationship(back_populates="call", uselist=False)
+    events: Mapped[list["CallEvent"]] = relationship(back_populates="call")
+    conversation_turns: Mapped[list["ConversationTurn"]] = relationship(back_populates="call")
+
+
+class ConversationTurn(Base):
+    __tablename__ = "conversation_turns"
+
+    id: Mapped[int] = Column(BigInteger, primary_key=True, index=True)
+    call_id: Mapped[int] = Column(BigInteger, ForeignKey("calls.id"), nullable=False, index=True)
+    speaker: Mapped[str] = Column(String(10), nullable=False)
+    text: Mapped[str] = Column(Text, nullable=False)
+    timestamp: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False)
+    latency_ms: Mapped[int | None] = Column(Integer, nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    call: Mapped[Call] = relationship(back_populates="conversation_turns")
+
+
+class CallEvent(Base):
+    __tablename__ = "call_events"
+
+    id: Mapped[int] = Column(BigInteger, primary_key=True, index=True)
+    call_id: Mapped[int] = Column(BigInteger, ForeignKey("calls.id"), nullable=False, index=True)
+    event_type: Mapped[str] = Column(String(60), nullable=False)
+    timestamp: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    metadata_json: Mapped[dict[str, Any]] = Column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    call: Mapped[Call] = relationship(back_populates="events")
 
 
 class CallOutcome(Base):
