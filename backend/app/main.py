@@ -4,8 +4,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.routers.customer_router import router as customer_router
 
 app = FastAPI(title="Followup Voice Agent Backend")
+app.include_router(customer_router)
 
 
 @app.get("/health")
