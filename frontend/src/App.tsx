@@ -7,8 +7,8 @@ export default function App(){
       <header className="header">
         <div className="logo">FA</div>
         <div>
-          <h1 style={{margin:0}}>Followup Agent</h1>
-          <div className="muted">Collections voice agent console</div>
+          <h1 style={{margin:0}}>Follow-up Customer Call</h1>
+          <div className="muted">A bank recovery agent will speak with the selected customer</div>
         </div>
       </header>
       <Dashboard />

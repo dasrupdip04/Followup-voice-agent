@@ -6,8 +6,6 @@ lightweight smoke-test helpers that validate configuration and imports.
 import os
 from typing import Optional
 from app.livekit_agent.session import LiveSession
-from app.livekit_agent.prompts import OPENING_PROMPT, TURN_PROMPT
-from app.services.gemini_service import GeminiService
 
 
 class LiveKitAgent:
@@ -22,9 +20,7 @@ class LiveKitAgent:
         self.cartesia_key = self.config.get("CARTESIA_API_KEY") or os.getenv("CARTESIA_API_KEY")
         self.cartesia_model = self.config.get("CARTESIA_MODEL") or os.getenv("CARTESIA_MODEL")
         self.cartesia_voice_id = self.config.get("CARTESIA_VOICE_ID") or os.getenv("CARTESIA_VOICE_ID")
-        self.gemini = GeminiService()
-
-        # provider placeholders — initialized lazily to avoid noisy network ops
+        # Provider SDKs are imported lazily so status checks have no network side effects.
         self.livekit_client = None
         self.deepgram_plugin = None
         self.cartesia_plugin = None
@@ -38,26 +34,23 @@ class LiveKitAgent:
         """
         errors = {}
 
-        # LiveKit agents
+        # These are the real package/module names for LiveKit Agents 1.8.x.
         try:
-            import livekit_agents  # type: ignore
+            from livekit import agents as livekit_agents
 
-            # keep the module reference; do not start network IO here
             self.livekit_client = livekit_agents
         except Exception as e:  # pragma: no cover - best-effort import
             errors["livekit_agents"] = str(e)
 
-        # Deepgram plugin
         try:
-            import livekit_plugins_deepgram as _dg  # type: ignore
+            from livekit.plugins import deepgram as _dg
 
             self.deepgram_plugin = _dg
         except Exception as e:  # pragma: no cover
             errors["deepgram_plugin"] = str(e)
 
-        # Cartesia plugin
         try:
-            import livekit_plugins_cartesia as _ct  # type: ignore
+            from livekit.plugins import cartesia as _ct
 
             self.cartesia_plugin = _ct
         except Exception as e:  # pragma: no cover
@@ -70,7 +63,7 @@ class LiveKitAgent:
 
         Returns a dict with the status of each provider and any import errors.
         """
-        result = {"gemini": True, "gemini_model": getattr(self.gemini, "model_name", None)}
+        result = {"gemini": bool(os.getenv("GEMINI_API_KEY"))}
         imports = self.init_providers()
         result.update({"imports": imports})
 
@@ -91,7 +84,5 @@ class LiveKitAgent:
         session.strategy = {"objective": "Opening: introduce, confirm identity, discuss payment options"}
         return session
 
-    # Room/join helpers are intentionally not implemented here because the
-    # concrete LiveKit Agents API and runtime details vary; implementors can
-    # use `self.livekit_client` (if available) to create an agent that joins
-    # a room and wires Deepgram + Cartesia plugin policies.
+    # LiveKit room handling and provider wiring live in runner.py, against the
+    # installed LiveKit Agents API.

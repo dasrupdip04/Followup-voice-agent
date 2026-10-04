@@ -35,3 +35,10 @@ class EndCallResponse(BaseModel):
     status: str
     outcome: dict[str, Any]
     metrics: dict[str, Any]
+
+
+class VoiceJoinResponse(BaseModel):
+    call_id: int
+    room_name: str
+    livekit_url: str
+    token: str

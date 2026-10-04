@@ -1,5 +1,18 @@
+import json
+import logging
+import os
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from livekit.api import (
+    AccessToken,
+    CreateAgentDispatchRequest,
+    CreateRoomRequest,
+    ListRoomsRequest,
+    LiveKitAPI,
+    VideoGrants,
+)
 
 from app.db import get_db
 from app.schemas.agent import (
@@ -16,11 +29,14 @@ from app.schemas.call_lifecycle import (
     EndCallResponse,
     StartCallRequest,
     StartCallResponse,
+    VoiceJoinResponse,
 )
+from app.models.customer_models import Call, Customer
 from app.services.call_lifecycle_service import CallLifecycleService
 from app.services.gemini_service import GeminiConfigError, GeminiService
 
 router = APIRouter(prefix="/api/v1", tags=["agent"])
+logger = logging.getLogger(__name__)
 
 BANKING_SYSTEM_INSTRUCTIONS = (
     "You are a helpful banking follow-up agent. "
@@ -46,6 +62,78 @@ def start_call(payload: StartCallRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start call: {str(exc)}") from exc
+
+
+@router.post("/agent/calls/{call_id}/voice", response_model=VoiceJoinResponse)
+async def start_voice_session(call_id: int, db: Session = Depends(get_db)):
+    """Create a room/agent dispatch and return a short-lived room-scoped token."""
+    call = db.get(Call, call_id)
+    if call is None:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if call.status not in {"INITIATED", "IN_PROGRESS"}:
+        raise HTTPException(status_code=409, detail="Call is no longer active")
+
+    livekit_url = os.getenv("LIVEKIT_URL")
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    if not (livekit_url and api_key and api_secret):
+        raise HTTPException(status_code=503, detail="LiveKit is not configured")
+
+    customer = db.get(Customer, call.customer_id)
+    room_name = f"followup-call-{call_id}"
+    livekit = LiveKitAPI(url=livekit_url, api_key=api_key, api_secret=api_secret)
+    room_created = False
+    try:
+        existing_rooms = await livekit.room.list_rooms(ListRoomsRequest(names=[room_name]))
+        if not existing_rooms.rooms:
+            await livekit.room.create_room(
+                CreateRoomRequest(name=room_name, empty_timeout=120, max_participants=4)
+            )
+            room_created = True
+            await livekit.agent_dispatch.create_dispatch(
+                CreateAgentDispatchRequest(
+                    agent_name="followup-voice-agent",
+                    room=room_name,
+                    metadata=json.dumps({"call_id": call_id, "customer_id": call.customer_id}),
+                )
+            )
+
+        token = (
+            AccessToken(api_key, api_secret)
+            .with_identity(f"customer-{call.customer_id}")
+            .with_name(customer.full_name if customer else f"Customer {call.customer_id}")
+            .with_grants(
+                VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
+            )
+            .with_ttl(timedelta(minutes=30))
+            .to_jwt()
+        )
+        return {
+            "call_id": call_id,
+            "room_name": room_name,
+            "livekit_url": livekit_url,
+            "token": token,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not prepare LiveKit room for call %s", call_id)
+        if room_created:
+            try:
+                from livekit.api import DeleteRoomRequest
+
+                await livekit.room.delete_room(DeleteRoomRequest(room=room_name))
+            except Exception:
+                pass
+        raise HTTPException(status_code=502, detail="Could not prepare the LiveKit call") from exc
+    finally:
+        await livekit.aclose()
 
 
 @router.post("/agent/calls/{call_id}/message", response_model=CallMessageResponse)

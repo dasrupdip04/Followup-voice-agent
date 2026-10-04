@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -33,7 +33,7 @@ class CallLifecycleService:
 
         call = Call(
             customer_id=customer_id,
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
             status="INITIATED",
             agent_id="followup-agent",
         )
@@ -76,14 +76,63 @@ class CallLifecycleService:
             call = self.db.get(Call, call_id)
             if call is None:
                 raise ValueError("Call not found")
+
+            turns = self.db.execute(
+                select(ConversationTurn)
+                .where(ConversationTurn.call_id == call_id)
+                .order_by(ConversationTurn.timestamp.asc(), ConversationTurn.id.asc())
+            ).scalars().all()
+            start_event = self.db.execute(
+                select(CallEvent)
+                .where(CallEvent.call_id == call_id, CallEvent.event_type == "CALL_STARTED")
+                .order_by(CallEvent.id.asc())
+            ).scalars().first()
+            message_events = self.db.execute(
+                select(CallEvent)
+                .where(CallEvent.call_id == call_id, CallEvent.event_type == "MESSAGE_RECEIVED")
+                .order_by(CallEvent.id.asc())
+            ).scalars().all()
+            strategy = (start_event.metadata_json or {}).get("strategy", {}) if start_event else {}
+            stored_tool_calls = [
+                tool_call
+                for event in message_events
+                for tool_call in (event.metadata_json or {}).get("tool_calls", [])
+            ]
             state = ConversationState(
                 customer_id=call.customer_id,
                 call_id=call.id,
                 customer_context={},
-                started_at=call.started_at or datetime.utcnow(),
-                call_strategy={},
+                conversation_history=[{"speaker": turn.speaker, "text": turn.text} for turn in turns],
+                call_strategy=strategy,
+                current_objective=strategy.get("objective"),
+                turn_count=sum(1 for turn in turns if turn.speaker == "CUSTOMER"),
+                started_at=call.started_at or datetime.now(timezone.utc),
+                tool_calls=stored_tool_calls,
             )
             self.state_store.store(state)
+
+        # A LiveKit worker and the FastAPI process have separate in-memory
+        # ConversationStateStore instances. Always refresh persisted turns and
+        # tool events so API-side call ending analyzes the actual conversation.
+        persisted_turns = self.db.execute(
+            select(ConversationTurn)
+            .where(ConversationTurn.call_id == call_id)
+            .order_by(ConversationTurn.timestamp.asc(), ConversationTurn.id.asc())
+        ).scalars().all()
+        message_events = self.db.execute(
+            select(CallEvent)
+            .where(CallEvent.call_id == call_id, CallEvent.event_type == "MESSAGE_RECEIVED")
+            .order_by(CallEvent.id.asc())
+        ).scalars().all()
+        state.conversation_history = [
+            {"speaker": turn.speaker, "text": turn.text} for turn in persisted_turns
+        ]
+        state.turn_count = sum(1 for turn in persisted_turns if turn.speaker == "CUSTOMER")
+        state.tool_calls = [
+            tool_call
+            for event in message_events
+            for tool_call in (event.metadata_json or {}).get("tool_calls", [])
+        ]
         return state
 
     def handle_message(self, call_id: int, message: str, conversation_history: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -122,18 +171,18 @@ class CallLifecycleService:
                 "strategy": state.call_strategy,
                 "summary": state.customer_context.get("customer_summary"),
             },
-            max_tool_rounds=1,
+            max_tool_rounds=3,
             db=self.db,
             trusted_customer_id=state.customer_id,
         )
 
         assistant_text = response["response"]
         state.conversation_history.append({"speaker": "AGENT", "text": assistant_text})
-        state.tool_calls = response.get("tool_calls", [])
+        state.tool_calls.extend(response.get("tool_calls", []))
         state.next_action = state.call_strategy.get("payment_commitment_goal") if state.call_strategy else None
 
-        self.db.add(ConversationTurn(call_id=call_id, speaker="CUSTOMER", text=message, timestamp=datetime.utcnow()))
-        self.db.add(ConversationTurn(call_id=call_id, speaker="AGENT", text=assistant_text, timestamp=datetime.utcnow()))
+        self.db.add(ConversationTurn(call_id=call_id, speaker="CUSTOMER", text=message, timestamp=datetime.now(timezone.utc)))
+        self.db.add(ConversationTurn(call_id=call_id, speaker="AGENT", text=assistant_text, timestamp=datetime.now(timezone.utc)))
         self.db.flush()
         self.db.add(
             CallEvent(
@@ -175,21 +224,62 @@ class CallLifecycleService:
                     "notes": existing_outcome.notes if existing_outcome else None,
                 },
                 "metrics": {
+                    "duration_seconds": call.duration_seconds,
                     "total_turns": existing_metric.total_turns if existing_metric else len(state.conversation_history),
+                    "user_turns": existing_metric.user_turns if existing_metric else sum(
+                        1 for turn in state.conversation_history if turn.get("speaker") == "CUSTOMER"
+                    ),
+                    "agent_turns": existing_metric.agent_turns if existing_metric else sum(
+                        1 for turn in state.conversation_history if turn.get("speaker") == "AGENT"
+                    ),
                     "tool_calls": existing_metric.tool_calls if existing_metric else len(state.tool_calls),
+                    "tool_failures": existing_metric.tool_failures if existing_metric else sum(
+                        1 for tool_call in state.tool_calls if tool_call.get("success") is False
+                    ),
                 },
             }
 
         call.status = "COMPLETED"
-        call.ended_at = datetime.utcnow()
+        call.ended_at = datetime.now(timezone.utc)
         if call.started_at:
             call.duration_seconds = int((call.ended_at - call.started_at).total_seconds())
 
         final_analysis = self._generate_final_analysis(call_id, state)
+        allowed_outcomes = {
+            "PROMISE_TO_PAY",
+            "PAYMENT_COMPLETED",
+            "CALLBACK_REQUESTED",
+            "REFUSED",
+            "NO_ANSWER",
+            "WRONG_NUMBER",
+            "DISPUTE",
+            "NEEDS_HUMAN",
+        }
+        outcome_type = str(final_analysis.get("outcome") or "CALLBACK_REQUESTED").upper()
+        if outcome_type not in allowed_outcomes:
+            outcome_type = "CALLBACK_REQUESTED"
+        final_analysis["outcome"] = outcome_type
+
+        persisted_turns = self.db.execute(
+            select(ConversationTurn.speaker).where(ConversationTurn.call_id == call_id)
+        ).scalars().all()
+        user_turns = sum(1 for speaker in persisted_turns if speaker == "CUSTOMER")
+        agent_turns = sum(1 for speaker in persisted_turns if speaker == "AGENT")
+        message_events = self.db.execute(
+            select(CallEvent.metadata_json).where(
+                CallEvent.call_id == call_id,
+                CallEvent.event_type == "MESSAGE_RECEIVED",
+            )
+        ).scalars().all()
+        persisted_tool_calls = [
+            tool_call
+            for metadata in message_events
+            for tool_call in (metadata or {}).get("tool_calls", [])
+        ]
 
         outcome = CallOutcome(
             call_id=call_id,
-            outcome_type=final_analysis.get("outcome") or "CALLBACK_REQUESTED",
+            outcome_type=outcome_type,
             notes=final_analysis.get("summary") or summary,
             promised_amount=final_analysis.get("commitment_amount"),
             promised_date=final_analysis.get("commitment_date"),
@@ -198,17 +288,17 @@ class CallLifecycleService:
 
         metric = CallMetric(
             call_id=call_id,
-            total_turns=state.turn_count,
-            user_turns=sum(1 for turn in state.conversation_history if turn.get("speaker") == "CUSTOMER"),
-            agent_turns=sum(1 for turn in state.conversation_history if turn.get("speaker") == "AGENT"),
+            total_turns=user_turns + agent_turns,
+            user_turns=user_turns,
+            agent_turns=agent_turns,
             avg_response_latency_ms=None,
             avg_stt_latency_ms=None,
             avg_llm_latency_ms=None,
             avg_tts_latency_ms=None,
             user_interruptions=0,
             agent_interruptions=0,
-            tool_calls=len(state.tool_calls),
-            tool_failures=0,
+            tool_calls=len(persisted_tool_calls),
+            tool_failures=sum(1 for tool_call in persisted_tool_calls if tool_call.get("success") is False),
             tokens_input=0,
             tokens_output=0,
         )
@@ -236,8 +326,11 @@ class CallLifecycleService:
             "outcome": final_analysis,
             "metrics": {
                 "duration_seconds": call.duration_seconds,
-                "total_turns": state.turn_count,
-                "tool_calls": len(state.tool_calls),
+                "total_turns": user_turns + agent_turns,
+                "user_turns": user_turns,
+                "agent_turns": agent_turns,
+                "tool_calls": len(persisted_tool_calls),
+                "tool_failures": sum(1 for tool_call in persisted_tool_calls if tool_call.get("success") is False),
             },
         }
 

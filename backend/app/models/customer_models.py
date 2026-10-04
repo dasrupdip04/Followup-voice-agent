@@ -99,8 +99,8 @@ class CallEvent(Base):
     id: Mapped[int] = Column(BigInteger, primary_key=True, index=True)
     call_id: Mapped[int] = Column(BigInteger, ForeignKey("calls.id"), nullable=False, index=True)
     event_type: Mapped[str] = Column(String(60), nullable=False)
-    timestamp: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    metadata_json: Mapped[dict[str, Any]] = Column(JSON, nullable=False, default=dict)
+    timestamp: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    metadata_json: Mapped[dict[str, Any]] = Column("metadata", JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     call: Mapped[Call] = relationship(back_populates="events")

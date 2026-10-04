@@ -1,22 +1,15 @@
-"""CLI runner to start the LiveKitRunner.
+"""Start the LiveKit Agents 1.8 voice worker.
 
-Usage:
-    python -m app.livekit_agent.run_agent
+Run from ``backend`` with the project virtualenv:
+    ../.venv/bin/python -m app.livekit_agent.run_agent dev
 """
-import os
-import logging
-from app.livekit_agent.runner import LiveKitRunner
 
-logging.basicConfig(level=logging.INFO)
+from dotenv import load_dotenv
 
-def main():
-    runner = LiveKitRunner()
-    init_errors = runner.init_sdks()
-    if init_errors:
-        logging.warning("Provider SDKs/imports reported issues: %s", init_errors)
-        # still exit non-zero to indicate limited functionality
-    result = runner.start()
-    logging.info("Runner result: %s", result)
+load_dotenv()
 
-if __name__ == '__main__':
-    main()
+from app.livekit_agent.runner import start
+
+
+if __name__ == "__main__":
+    start()

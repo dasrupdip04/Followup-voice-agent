@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -18,7 +18,7 @@ class ConversationState:
     objections: list[str] = field(default_factory=list)
     next_action: str | None = None
     turn_count: int = 0
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 

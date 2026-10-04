@@ -7,3 +7,4 @@ google-genai
 livekit-agents
 livekit-plugins-deepgram
 livekit-plugins-cartesia
+livekit-api
