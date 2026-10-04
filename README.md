@@ -1,3 +1,5 @@
+<img width="1920" height="1080" alt="ss2" src="https://github.com/user-attachments/assets/852e3cbf-d7d3-4e73-9029-e0b338ccba11" />
+<img width="1920" height="1080" alt="ss1" src="https://github.com/user-attachments/assets/b2dd3eec-e05e-404c-9236-e48a562375ef" />
 # Followup Voice Agent
 
 This project is a phased prototype for a banking/payment follow-up voice agent.
