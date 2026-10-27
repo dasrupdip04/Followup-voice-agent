@@ -99,15 +99,35 @@ class GeminiService:
                     return int(value)
         return None
 
-    def _prepare_tool_payload(self, tool_name: str, payload: dict[str, Any], trusted_customer_id: int | None) -> dict[str, Any]:
+    def _resolve_trusted_call_id(self, customer_context: dict[str, Any] | None, request_call_id: int | None) -> int | None:
+        if request_call_id is not None:
+            return int(request_call_id)
+        if customer_context and isinstance(customer_context, dict):
+            for key in ("call_id", "id"):
+                value = customer_context.get(key)
+                if value is not None and str(value).isdigit():
+                    return int(value)
+        return None
+
+    def _prepare_tool_payload(
+        self,
+        tool_name: str,
+        payload: dict[str, Any],
+        trusted_customer_id: int | None,
+        trusted_call_id: int | None = None,
+    ) -> dict[str, Any]:
         cleaned = _normalize_tool_arguments(tool_name, payload or {})
 
-        if tool_name in {"get_customer_profile", "get_customer_loans", "get_customer_call_history", "get_customer_context"}:
+        if tool_name in {"get_customer_profile", "get_customer_loans", "get_customer_call_history", "get_customer_context", "get_full_customer_context"}:
             cleaned["_trusted_customer_id"] = trusted_customer_id
             cleaned.pop("customer_id", None)
         elif tool_name in {"get_loan_details", "get_payment_history"}:
             cleaned["_trusted_customer_id"] = trusted_customer_id
             cleaned.pop("customer_id", None)
+        elif tool_name in {"record_payment_commitment", "record_conversation_turn", "record_customer_response", "update_call_outcome", "save_call_event"}:
+            if trusted_call_id is not None:
+                cleaned["_trusted_call_id"] = trusted_call_id
+                cleaned["call_id"] = trusted_call_id
         return cleaned
 
     def execute_tool_call(
@@ -117,6 +137,7 @@ class GeminiService:
         arguments: dict[str, Any],
         db: Session | None = None,
         trusted_customer_id: int | None = None,
+        trusted_call_id: int | None = None,
     ) -> dict[str, Any]:
         if tool_name not in ALLOWED_TOOL_NAMES:
             raise ValueError(f"Tool '{tool_name}' is not allowed")
@@ -124,7 +145,7 @@ class GeminiService:
         fn = get_tool_function(tool_name)
         session = db or SessionLocal()
         try:
-            payload = self._prepare_tool_payload(tool_name, arguments or {}, trusted_customer_id)
+            payload = self._prepare_tool_payload(tool_name, arguments or {}, trusted_customer_id, trusted_call_id)
             print(f"[tool-call] name={tool_name} args={payload}")
             result = fn(session, **payload)
             return {"tool": tool_name, "success": True, "result": result}
@@ -142,11 +163,13 @@ class GeminiService:
         max_tool_rounds: int = 3,
         db: Session | None = None,
         trusted_customer_id: int | None = None,
+        trusted_call_id: int | None = None,
     ) -> dict[str, Any]:
         if not current_message or not current_message.strip():
             raise ValueError("current_message must not be empty")
 
         resolved_customer_id = self._resolve_trusted_customer_id(customer_context, trusted_customer_id)
+        resolved_call_id = self._resolve_trusted_call_id(customer_context, trusted_call_id)
         history = conversation_history or []
         tool_results: list[dict[str, Any]] = []
         round_count = 0
@@ -233,6 +256,7 @@ class GeminiService:
                     arguments=_normalize_tool_arguments(tool_name, dict(tool_args)),
                     db=db,
                     trusted_customer_id=resolved_customer_id,
+                    trusted_call_id=resolved_call_id,
                 )
                 tool_results.append(tool_result)
                 prompt += f"\nTool call: {tool_name}\nArguments: {json.dumps(tool_args, default=str)}\nTool result: {json.dumps(tool_result, default=str)}\n"

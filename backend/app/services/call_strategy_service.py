@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -14,10 +15,18 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 class CallStrategyService:
     def __init__(self, api_key: str | None = None, model_name: str | None = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY is not configured")
         self.model_name = model_name or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
-        self.client = genai.Client(api_key=self.api_key)
+        if self.api_key:
+            try:
+                self.client = genai.Client(api_key=self.api_key)
+            except Exception as exc:
+                # Invalid or unusable API key – fall back to offline mode
+                logger = logging.getLogger(__name__)
+                logger.warning("Gemini API key invalid or client init failed: %s. Using fallback strategy.", exc)
+                self.client = None
+        else:
+            # No API key – operate in offline fallback mode
+            self.client = None
 
     @staticmethod
     def _parse_json_response(raw_text: str | Any) -> dict[str, Any]:
@@ -103,31 +112,40 @@ class CallStrategyService:
         }
 
     def generate_strategy(self, customer_context: dict[str, Any]) -> dict[str, Any]:
+        # If no Gemini client (missing or invalid API key), fallback to deterministic strategy
+        if self.client is None:
+            return self._fallback_strategy(customer_context)
+
         prompt = json.dumps({
             "customer_context": customer_context,
             "task": "Generate a concise collections follow-up strategy using only supplied facts. Return JSON with structured keys only."
         }, default=str)
 
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=(
-                "You are a collections follow-up assistant for a banking loan team. "
-                "Generate a compact, factual strategy for a customer conversation. "
-                "Use only facts present in the supplied customer context. "
-                "Do not invent amounts, dates, or promises. "
-                "Output valid JSON with exactly these keys: "
-                "objective, priority_issue, customer_risk_context, recommended_opening, key_facts_to_mention, "
-                "questions_to_ask, possible_objections, recommended_response_style, payment_commitment_goal, "
-                "escalation_conditions, topics_to_avoid. "
-                "Values must be JSON primitives or arrays of strings. "
-                f"Customer context: {prompt}"
-            ),
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                top_p=0.8,
-                max_output_tokens=512,
-            ),
-        )
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=(
+                    "You are a collections follow-up assistant for a banking loan team. "
+                    "Generate a compact, factual strategy for a customer conversation. "
+                    "Use only facts present in the supplied customer context. "
+                    "Do not invent amounts, dates, or promises. "
+                    "Output valid JSON with exactly these keys: "
+                    "objective, priority_issue, customer_risk_context, recommended_opening, key_facts_to_mention, "
+                    "questions_to_ask, possible_objections, recommended_response_style, payment_commitment_goal, "
+                    "escalation_conditions, topics_to_avoid. "
+                    f"Customer context: {prompt}"
+                ),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    top_p=0.8,
+                    max_output_tokens=512,
+                ),
+            )
+        except Exception as exc:
+            # Any failure (auth, network, etc.) – fall back to deterministic strategy
+            logger = logging.getLogger(__name__)
+            logger.warning("Gemini request failed (%s); using fallback strategy.", exc)
+            return self._fallback_strategy(customer_context)
 
         text = getattr(response, "text", None)
         if text is None:

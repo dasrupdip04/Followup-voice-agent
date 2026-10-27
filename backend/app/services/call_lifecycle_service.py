@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,8 @@ from app.services.call_strategy_service import CallStrategyService
 from app.services.conversation_state import ConversationState, ConversationStateStore
 from app.services.customer_context_service import CustomerContextService
 from app.tools.customer_tools import get_full_customer_context
+
+logger = logging.getLogger(__name__)
 
 
 class CallLifecycleService:
@@ -174,6 +177,7 @@ class CallLifecycleService:
             max_tool_rounds=3,
             db=self.db,
             trusted_customer_id=state.customer_id,
+            trusted_call_id=call_id,
         )
 
         assistant_text = response["response"]
@@ -277,32 +281,53 @@ class CallLifecycleService:
             for tool_call in (metadata or {}).get("tool_calls", [])
         ]
 
-        outcome = CallOutcome(
-            call_id=call_id,
-            outcome_type=outcome_type,
-            notes=final_analysis.get("summary") or summary,
-            promised_amount=final_analysis.get("commitment_amount"),
-            promised_date=final_analysis.get("commitment_date"),
-        )
-        self.db.add(outcome)
+        existing_outcome = self.db.execute(
+            select(CallOutcome).where(CallOutcome.call_id == call_id)
+        ).scalar_one_or_none()
+        if existing_outcome:
+            existing_outcome.outcome_type = outcome_type
+            existing_outcome.notes = final_analysis.get("summary") or summary or existing_outcome.notes
+            if final_analysis.get("commitment_amount"):
+                existing_outcome.promised_amount = final_analysis.get("commitment_amount")
+            if final_analysis.get("commitment_date"):
+                existing_outcome.promised_date = final_analysis.get("commitment_date")
+        else:
+            outcome = CallOutcome(
+                call_id=call_id,
+                outcome_type=outcome_type,
+                notes=final_analysis.get("summary") or summary,
+                promised_amount=final_analysis.get("commitment_amount"),
+                promised_date=final_analysis.get("commitment_date"),
+            )
+            self.db.add(outcome)
 
-        metric = CallMetric(
-            call_id=call_id,
-            total_turns=user_turns + agent_turns,
-            user_turns=user_turns,
-            agent_turns=agent_turns,
-            avg_response_latency_ms=None,
-            avg_stt_latency_ms=None,
-            avg_llm_latency_ms=None,
-            avg_tts_latency_ms=None,
-            user_interruptions=0,
-            agent_interruptions=0,
-            tool_calls=len(persisted_tool_calls),
-            tool_failures=sum(1 for tool_call in persisted_tool_calls if tool_call.get("success") is False),
-            tokens_input=0,
-            tokens_output=0,
-        )
-        self.db.add(metric)
+        existing_metric = self.db.execute(
+            select(CallMetric).where(CallMetric.call_id == call_id)
+        ).scalar_one_or_none()
+        if existing_metric:
+            existing_metric.total_turns = user_turns + agent_turns
+            existing_metric.user_turns = user_turns
+            existing_metric.agent_turns = agent_turns
+            existing_metric.tool_calls = len(persisted_tool_calls)
+            existing_metric.tool_failures = sum(1 for tool_call in persisted_tool_calls if tool_call.get("success") is False)
+        else:
+            metric = CallMetric(
+                call_id=call_id,
+                total_turns=user_turns + agent_turns,
+                user_turns=user_turns,
+                agent_turns=agent_turns,
+                avg_response_latency_ms=None,
+                avg_stt_latency_ms=None,
+                avg_llm_latency_ms=None,
+                avg_tts_latency_ms=None,
+                user_interruptions=0,
+                agent_interruptions=0,
+                tool_calls=len(persisted_tool_calls),
+                tool_failures=sum(1 for tool_call in persisted_tool_calls if tool_call.get("success") is False),
+                tokens_input=0,
+                tokens_output=0,
+            )
+            self.db.add(metric)
 
         self.db.add(
             CallEvent(
@@ -380,20 +405,38 @@ class CallLifecycleService:
             "next_action": state.next_action,
         }
 
-        response = service.client.models.generate_content(
-            model=service.model_name,
-            contents=(
-                "Analyze the completed banking collections conversation and produce JSON only. "
-                "Use facts from the supplied conversation only. If something is unknown, use null. "
-                "Return keys: outcome, payment_commitment, commitment_amount, commitment_date, reason_for_nonpayment, objection, customer_sentiment, cooperation_level, promise_to_pay, follow_up_required, escalation_required, summary, key_events. "
-                f"Conversation data: {raw}"
-            ),
-            config=__import__('google.genai.types', fromlist=['GenerateContentConfig']).GenerateContentConfig(
-                temperature=0.2,
-                top_p=0.8,
-                max_output_tokens=512,
-            ),
-        )
+        try:
+            response = service.client.models.generate_content(
+                model=service.model_name,
+                contents=(
+                    "Analyze the completed banking collections conversation and produce JSON only. "
+                    "Use facts from the supplied conversation only. If something is unknown, use null. "
+                    "Return keys: outcome, payment_commitment, commitment_amount, commitment_date, reason_for_nonpayment, objection, customer_sentiment, cooperation_level, promise_to_pay, follow_up_required, escalation_required, summary, key_events. "
+                    f"Conversation data: {raw}"
+                ),
+                config=__import__('google.genai.types', fromlist=['GenerateContentConfig']).GenerateContentConfig(
+                    temperature=0.2,
+                    top_p=0.8,
+                    max_output_tokens=512,
+                ),
+            )
+        except Exception:
+            logger.warning("Gemini final analysis failed; returning fallback analysis.")
+            return {
+                "outcome": "UNKNOWN",
+                "payment_commitment": None,
+                "commitment_amount": None,
+                "commitment_date": None,
+                "reason_for_nonpayment": None,
+                "objection": None,
+                "customer_sentiment": None,
+                "cooperation_level": None,
+                "promise_to_pay": None,
+                "follow_up_required": True,
+                "escalation_required": False,
+                "summary": "Conversation ended.",
+                "key_events": [],
+            }
 
         text = getattr(response, "text", None)
         if text is None:

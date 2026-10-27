@@ -1,1 +1,32 @@
+# Environment variables (do not commit secrets)
 .env
+.env.*
+!.env.example
+*.env
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+.venv/
+venv/
+ENV/
+
+# Node
+node_modules/
+frontend/node_modules/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

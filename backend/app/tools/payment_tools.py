@@ -17,20 +17,27 @@ class ToolValidationError(ValueError):
 def record_payment_commitment(
     db: Session,
     *,
-    call_id: int,
+    call_id: int | str | None = None,
     loan_id: int,
     commitment_date: date,
     amount: Decimal | str | float,
     notes: str,
+    _trusted_call_id: int | None = None,
 ) -> dict[str, Any]:
-    if call_id is None:
+    effective_call_id = _trusted_call_id or call_id
+    if effective_call_id is None:
         raise ToolValidationError("call_id is required")
+    if isinstance(effective_call_id, str):
+        try:
+            effective_call_id = int(effective_call_id.strip())
+        except (ValueError, TypeError):
+            raise ToolValidationError(f"call_id must be an integer, got: {effective_call_id}")
     if loan_id is None:
         raise ToolValidationError("loan_id is required")
     if not notes or not notes.strip():
         raise ToolValidationError("notes is required")
 
-    call = db.get(Call, call_id)
+    call = db.get(Call, effective_call_id)
     if call is None:
         raise ToolValidationError("Call not found")
 

@@ -13,6 +13,9 @@ class StartCallResponse(BaseModel):
     call_id: int
     customer: dict[str, Any]
     strategy: dict[str, Any]
+    room_name: str | None = None
+    livekit_url: str | None = None
+    token: str | None = None
 
 
 class CallMessageRequest(BaseModel):

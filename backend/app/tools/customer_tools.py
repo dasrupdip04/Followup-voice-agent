@@ -305,18 +305,22 @@ get_customer_context.__signature__ = inspect.Signature(
 )
 
 
-def get_full_customer_context(db: Session, customer_id: int) -> dict[str, Any]:
+def get_full_customer_context(
+    db: Session,
+    customer_id: int | None = None,
+    *,
+    _trusted_customer_id: int | None = None,
+) -> dict[str, Any]:
     """Return the complete current customer context in one backend query: profile, loans, payment history, and prior call metadata. Use this instead of multiple separate customer/loan/payment read tools when the full context is needed."""
-    if customer_id is None:
-        raise ToolValidationError("customer_id is required")
+    resolved_customer_id = _resolve_customer_id(customer_id, trusted_customer_id=_trusted_customer_id)
 
-    customer = db.get(Customer, customer_id)
+    customer = db.get(Customer, resolved_customer_id)
     if customer is None:
         raise ToolValidationError("Customer not found")
 
     loans = db.execute(
         select(Loan)
-        .where(Loan.customer_id == customer_id)
+        .where(Loan.customer_id == resolved_customer_id)
         .order_by(Loan.due_date.asc())
     ).scalars().all()
 
